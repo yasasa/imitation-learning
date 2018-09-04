@@ -15,12 +15,17 @@ from agents.imitation.imitation_learning_network import load_imitation_learning_
 
 
 class ImitationLearning(Agent):
-
-    def __init__(self, city_name, avoid_stopping, memory_fraction=0.25, image_cut=[115, 510]):
+    def __init__(self,
+                 city_name,
+                 avoid_stopping,
+                 memory_fraction=0.25,
+                 image_cut=[115, 510]):
 
         Agent.__init__(self)
 
-        self.dropout_vec = [1.0] * 8 + [0.7] * 2 + [0.5] * 2 + [0.5] * 1 + [0.5, 1.] * 5
+        self.dropout_vec = [1.0] * 8 + [0.7] * 2 + [0.5] * 2 + [0.5] * 1 + [
+            0.5, 1.
+        ] * 5
 
         config_gpu = tf.ConfigProto()
 
@@ -36,25 +41,30 @@ class ImitationLearning(Agent):
         self._sess = tf.Session(config=config_gpu)
 
         with tf.device('/gpu:0'):
-            self._input_images = tf.placeholder("float", shape=[None, self._image_size[0],
-                                                                self._image_size[1],
-                                                                self._image_size[2]],
-                                                name="input_image")
+            self._input_images = tf.placeholder(
+                "float",
+                shape=[
+                    None, self._image_size[0], self._image_size[1],
+                    self._image_size[2]
+                ],
+                name="input_image")
 
             self._input_data = []
 
-            self._input_data.append(tf.placeholder(tf.float32,
-                                                   shape=[None, 4], name="input_control"))
+            self._input_data.append(
+                tf.placeholder(
+                    tf.float32, shape=[None, 4], name="input_control"))
 
-            self._input_data.append(tf.placeholder(tf.float32,
-                                                   shape=[None, 1], name="input_speed"))
+            self._input_data.append(
+                tf.placeholder(
+                    tf.float32, shape=[None, 1], name="input_speed"))
 
             self._dout = tf.placeholder("float", shape=[len(self.dropout_vec)])
 
         with tf.name_scope("Network"):
-            self._network_tensor = load_imitation_learning_network(self._input_images,
-                                                                   self._input_data,
-                                                                   self._image_size, self._dout)
+            self._network_tensor = load_imitation_learning_network(
+                self._input_images, self._input_data, self._image_size,
+                self._dout)
 
         import os
         dir_path = os.path.dirname(__file__)
@@ -86,10 +96,55 @@ class ImitationLearning(Agent):
 
         return ckpt
 
+    def train_model(self, images, speeds, commands, outputs, epochs=2000, batch_size=128):
+        self.load_model()
+
+        batches = self._network_tensor
+        saver = tf.train.Saver(tf.global_variables())
+        pred = tf.placeholder(tf.float32, shape=batches[0].shape)
+        cmd = tf.placeholder(tf.int32)
+        _output = lambda x: tf.case(
+                    {
+                        tf.equal(x, tf.constant(0)): lambda: batches[0],
+                        tf.equal(x, tf.constant(1)): lambda: batches[1],
+                        tf.equal(x, tf.constant(2)): lambda: batches[2],
+                        tf.equal(x, tf.constant(3)): lambda: batches[3]
+                        }, default=lambda: batches[0])
+        output = tf.map_fn(_output, cmd, dtype=tf.float32)
+
+        loss = tf.reduce_mean(pred - output)
+        train = tf.train.AdamOptimizer(learning_rate=2e-4).minimize(loss)
+
+        self._sess.run(tf.global_variables_initializer())
+        for k in range(epochs):
+            i = np.random.permutation(len(images))
+            x_i = np.take(images, i, axis=0)
+            x_s = np.take(speeds, i, axis=0)
+            cmds = np.take(commands, i, axis=0)
+            y = np.take(outputs, i, axis=0)
+            for j in range(len(images)//batch_size):
+                start = j*batch_size
+                end = start + batch_size
+                self._sess.run(
+                train,
+                feed_dict={
+                    pred: y[start:end],
+                    cmd: cmds[start:end],
+                    self._input_images: x_i[start:end],
+                    self._input_data[1]: x_s[start:end],
+                    self._dout: [1]*len(self.dropout_vec)
+                })
+            if k % 10 == 9:
+                if k % 500 == 499:
+                    print(k)
+                saver.save(self._sess, self._models_path)
+
+
     def run_step(self, measurements, sensor_data, directions, target):
 
-        control = self._compute_action(sensor_data['CameraRGB'].data,
-                                       measurements.player_measurements.forward_speed, directions)
+        control = self._compute_action(
+            sensor_data['CameraRGB'].data,
+            measurements.player_measurements.forward_speed, directions)
 
         return control
 
@@ -97,13 +152,14 @@ class ImitationLearning(Agent):
 
         rgb_image = rgb_image[self._image_cut[0]:self._image_cut[1], :]
 
-        image_input = scipy.misc.imresize(rgb_image, [self._image_size[0],
-                                                      self._image_size[1]])
+        image_input = scipy.misc.imresize(
+            rgb_image, [self._image_size[0], self._image_size[1]])
 
         image_input = image_input.astype(np.float32)
         image_input = np.multiply(image_input, 1.0 / 255.0)
 
-        steer, acc, brake = self._control_function(image_input, speed, direction, self._sess)
+        steer, acc, brake = self._control_function(image_input, speed,
+                                                   direction, self._sess)
 
         # This a bit biased, but is to avoid fake breaking
 
@@ -151,7 +207,11 @@ class ImitationLearning(Agent):
         else:
             all_net = branches[1]
 
-        feedDict = {x: image_input, input_speed: speed, dout: [1] * len(self.dropout_vec)}
+        feedDict = {
+            x: image_input,
+            input_speed: speed,
+            dout: [1] * len(self.dropout_vec)
+        }
 
         output_all = sess.run(all_net, feed_dict=feedDict)
 
